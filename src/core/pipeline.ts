@@ -1,5 +1,5 @@
 // 上半段流水线：边缘提取 → 串链 → 一笔画 → 重采样 → 傅里叶。结果按「图片哈希 + 细致度」缓存。
-import { canny, silhouetteMask, toGray } from './edges';
+import { canny, mergeParallelEdges, silhouetteMask, toGray } from './edges';
 import { cleanChains, finalizeChains, marchingSquares, traceChains, type Chain } from './chains';
 import { greedyTour, treeTour } from './tour';
 import { resample, type Sampled } from './resample';
@@ -14,6 +14,8 @@ export interface PipelineOptions {
   detail: DetailKey;
   tree: boolean;
   jumpWeight: number;
+  /** 单线模式的闭运算半径；不传或 0 为双线（默认） */
+  lineRadius?: number;
 }
 
 export interface PipelineStats {
@@ -56,8 +58,13 @@ export function runPipeline(
       onStage('串链');
       chains = finalizeChains(loops, p.minLenFrac * diag, p.tol, p.maxChains);
     } else {
-      const edge = canny(gray, p.sigma, p.highPct, p.lowRatio);
+      let edge = canny(gray, p.sigma, p.highPct, p.lowRatio);
       lap('边缘');
+      if (opts.lineRadius) {
+        onStage('合并双线');
+        edge = mergeParallelEdges(edge, w, h, opts.lineRadius);
+        lap('单线');
+      }
       onStage('串链');
       chains = cleanChains(traceChains(edge, w, h), {
         minLen: p.minLenFrac * diag,
@@ -102,5 +109,5 @@ export function runPipeline(
 
 export function transferables(r: PipelineResult): Transferable[] {
   const s = r.sampled, c = r.spec;
-  return [s.x.buffer, s.y.buffer, s.jump.buffer, c.k.buffer, c.re.buffer, c.im.buffer, c.r.buffer, c.phi.buffer, c.cum.buffer];
+  return [s.x.buffer, s.y.buffer, s.px.buffer, s.py.buffer, s.jump.buffer, c.k.buffer, c.re.buffer, c.im.buffer, c.r.buffer, c.phi.buffer, c.cum.buffer];
 }

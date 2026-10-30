@@ -40,6 +40,18 @@
             <button data-v="edge">边缘检测</button>
             <button data-v="silhouette">剪影</button>
           </div>
+          <div class="row">
+            <span class="label">线条</span>
+            <div class="seg mini" id="lineMode">
+              <button data-v="double">双线</button>
+              <button data-v="single">单线</button>
+            </div>
+          </div>
+          <div class="row" id="lineRadiusRow" hidden>
+            <span class="label">合并半径 r</span>
+            <input type="range" id="lineRadius" min="0.5" max="8" step="0.5" aria-label="合并半径" />
+            <span class="label num" id="lineRadiusVal"></span>
+          </div>
         </section>
 
         <section>
@@ -86,6 +98,25 @@
               <button data-v="dashed">淡色虚线</button>
               <button data-v="hidden">隐藏</button>
               <button data-v="solid">实线</button>
+            </div>
+          </div>
+          <div class="row">
+            <span class="label">颜色</span>
+            <div class="seg mini" id="vColor">
+              <button data-v="mono">单色</button>
+              <button data-v="source">原图色</button>
+            </div>
+          </div>
+          <div id="colorOpts" hidden>
+            <div class="row">
+              <span class="label">取色偏移 d</span>
+              <input type="range" id="colorOffset" min="1" max="16" step="1" value="4" aria-label="取色偏移" />
+              <span class="label num" id="colorOffsetVal"></span>
+            </div>
+            <div class="row">
+              <label class="check inline"><input type="checkbox" id="liftDark" checked /> 最低亮度</label>
+              <input type="range" id="minL" min="0.2" max="0.8" step="0.05" value="0.45" aria-label="最低亮度" />
+              <span class="label num" id="minLVal"></span>
             </div>
           </div>
         </section>

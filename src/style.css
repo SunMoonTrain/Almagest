@@ -234,6 +234,17 @@ input[type='range'] {
 .check input {
   accent-color: var(--accent);
 }
+.check.inline {
+  margin-top: 0;
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+}
+.num {
+  min-width: 46px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 
 .readout {
   margin-top: 6px;

@@ -196,6 +196,134 @@ export function thin(img: Uint8Array, w: number, h: number): void {
   }
 }
 
+function diskOffsets(r: number, w: number): { dx: number[]; dy: number[]; off: number[] } {
+  const R = Math.floor(r);
+  const dx: number[] = [], dy: number[] = [], off: number[] = [];
+  for (let y = -R; y <= R; y++) {
+    for (let x = -R; x <= R; x++) {
+      if (x * x + y * y > r * r) continue;
+      dx.push(x);
+      dy.push(y);
+      off.push(y * w + x);
+    }
+  }
+  return { dx, dy, off };
+}
+
+/**
+ * 单线模式：一条有粗细的描线经 Canny 会变成两侧各一条的平行双线。
+ * 闭运算（半径 r 的圆盘先膨胀后腐蚀）把相距小于约 2r 的平行边粘成一条粗线，
+ * 细化成 1 像素宽的中心线，再剪掉骨架化在拐角处长出的、短于 3r 的分支。
+ */
+export function mergeParallelEdges(edge: Uint8Array, w: number, h: number, r: number): Uint8Array {
+  const { dx, dy, off } = diskOffsets(r, w);
+  const K = off.length;
+  const dil = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!edge[y * w + x]) continue;
+      for (let k = 0; k < K; k++) {
+        const nx = x + dx[k], ny = y + dy[k];
+        if (nx >= 0 && ny >= 0 && nx < w && ny < h) dil[ny * w + nx] = 1;
+      }
+    }
+  }
+  const out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!dil[i]) continue;
+      let all = 1;
+      for (let k = 0; k < K; k++) {
+        const nx = x + dx[k], ny = y + dy[k];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h || !dil[i + off[k]]) {
+          all = 0;
+          break;
+        }
+      }
+      out[i] = all;
+    }
+  }
+  // 粗线拐角外侧的对角距离比 2r 大，闭运算会在那里留一个小洞，细化后成了小圈。把这类小洞填上。
+  fillSmallHoles(out, w, h, 8 * r * r);
+  clearBorder(out, w, h, 1);
+  thin(out, w, h);
+  if (pruneSpurs(out, w, h, 3 * r)) thin(out, w, h);
+  return out;
+}
+
+/** 把不连通到画面边框、面积不超过 maxArea 的背景区域（4 连通）填成前景。 */
+export function fillSmallHoles(img: Uint8Array, w: number, h: number, maxArea: number): void {
+  const seen = new Uint8Array(w * h);
+  const stack: number[] = [];
+  const region: number[] = [];
+  for (let s = 0; s < w * h; s++) {
+    if (img[s] || seen[s]) continue;
+    seen[s] = 1;
+    stack.push(s);
+    region.length = 0;
+    let border = false;
+    while (stack.length) {
+      const i = stack.pop()!;
+      region.push(i);
+      const x = i % w, y = (i - x) / w;
+      if (x === 0 || y === 0 || x === w - 1 || y === h - 1) border = true;
+      if (x > 0 && !img[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; stack.push(i - 1); }
+      if (x < w - 1 && !img[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; stack.push(i + 1); }
+      if (y > 0 && !img[i - w] && !seen[i - w]) { seen[i - w] = 1; stack.push(i - w); }
+      if (y < h - 1 && !img[i + w] && !seen[i + w]) { seen[i + w] = 1; stack.push(i + w); }
+    }
+    if (!border && region.length <= maxArea) for (const i of region) img[i] = 1;
+  }
+}
+
+const NX = [1, 1, 0, -1, -1, -1, 0, 1];
+const NY = [0, 1, 1, 1, 0, -1, -1, -1];
+
+/** 删掉一端悬空、另一端连交叉点、长度小于 maxLen 的分支。返回是否删过。 */
+export function pruneSpurs(img: Uint8Array, w: number, h: number, maxLen: number): boolean {
+  const count = (i: number) => {
+    const x = i % w, y = (i - x) / w;
+    let c = 0;
+    for (let d = 0; d < 8; d++) {
+      const nx = x + NX[d], ny = y + NY[d];
+      if (nx >= 0 && ny >= 0 && nx < w && ny < h && img[ny * w + nx]) c++;
+    }
+    return c;
+  };
+  const doomed: number[] = [];
+  for (let i = 0; i < w * h; i++) {
+    if (!img[i] || count(i) !== 1) continue;
+    const path = [i];
+    let prev = -1, cur = i, len = 0, hitJunction = false;
+    while (len < maxLen) {
+      const x = cur % w, y = (cur - x) / w;
+      let next = -1;
+      for (let d = 0; d < 8; d++) {
+        const nx = x + NX[d], ny = y + NY[d];
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const n = ny * w + nx;
+        if (img[n] && n !== prev && !path.includes(n)) {
+          next = n;
+          break;
+        }
+      }
+      if (next < 0) break; // 走到另一个端点：孤立短线，不是分支
+      len += next % w !== x && Math.floor(next / w) !== y ? Math.SQRT2 : 1;
+      if (count(next) >= 3) {
+        hitJunction = true;
+        break;
+      }
+      path.push(next);
+      prev = cur;
+      cur = next;
+    }
+    if (hitJunction && len < maxLen) doomed.push(...path);
+  }
+  for (const i of doomed) img[i] = 0;
+  return doomed.length > 0;
+}
+
 export function otsu(g: Gray): number {
   const hist = new Float64Array(256);
   for (let i = 0; i < g.data.length; i++) hist[Math.max(0, Math.min(255, Math.round(g.data[i])))]++;

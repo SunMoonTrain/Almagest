@@ -5,6 +5,9 @@ export interface Sampled {
   N: number;
   x: Float64Array;
   y: Float64Array;
+  /** 采样点在输入上的坐标（y 翻转、归一化之前；图片输入即缩放后原图的像素坐标），取色用 */
+  px: Float64Array;
+  py: Float64Array;
   /** jump[n] = 1 表示第 n 个采样点落在跳线上 */
   jump: Uint8Array;
   /** 世界坐标 = (像素坐标 − 中心) × scale */
@@ -50,7 +53,10 @@ export function resample(tour: Tour, N: number, flipH: number | null, jumpWeight
 
   const x = new Float64Array(N);
   const y = new Float64Array(N);
+  const px = new Float64Array(N);
+  const py = new Float64Array(N);
   const jump = new Uint8Array(N);
+  const raw = tour.pts;
   let seg = 0;
   for (let n = 0; n < N; n++) {
     const s = (n * L) / N;
@@ -60,7 +66,9 @@ export function resample(tour: Tour, N: number, flipH: number | null, jumpWeight
     const j = (seg + 1) % P;
     x[n] = xs[seg] + (xs[j] - xs[seg]) * u;
     y[n] = ys[seg] + (ys[j] - ys[seg]) * u;
+    px[n] = raw[2 * seg] + (raw[2 * j] - raw[2 * seg]) * u;
+    py[n] = raw[2 * seg + 1] + (raw[2 * j + 1] - raw[2 * seg + 1]) * u;
     jump[n] = tour.jump[seg] ? 1 : 0;
   }
-  return { N, x, y, jump, scale, cx, cy, flipH };
+  return { N, x, y, px, py, jump, scale, cx, cy, flipH };
 }

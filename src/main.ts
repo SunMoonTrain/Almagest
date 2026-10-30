@@ -6,6 +6,7 @@ import { DEMO_CURVES } from './core/curves';
 import { circleLimit, countForEnergy, energyKept, termsOf, traceCurve } from './core/fourier';
 import { coefficientsJSON, desmosText, equationLatex, type EqForm, type EqOptions } from './core/equation';
 import type { PipelineInput, PipelineOptions, PipelineResult } from './core/pipeline';
+import { traceColors, type TraceColors } from './core/colorize';
 import { GLCircles } from './glCircles';
 import { encodeGif } from './gif';
 
@@ -23,6 +24,8 @@ const FOLLOW_ZOOM = 6;
 const BG = '#0a0d16';
 const CIRCLE_RGBA: [number, number, number, number] = [143 / 255, 176 / 255, 1, 0.22];
 const CIRCLE_RGBA_CSS = 'rgba(143,176,255,0.22)';
+const TRACE_CSS = '#ffd27a';
+const JUMP_CSS = 'rgba(255,210,122,0.28)';
 /** loop：画一圈的帧数；hold：画完后定格的帧数（逐渐加圆模式定格更久） */
 const GIF = { size: 480, loop: 120, hold: 25, growHold: 50, delayMs: 50 };
 /** 公式超过这么多项时折叠显示 */
@@ -35,6 +38,9 @@ const state = {
   detail: 'medium' as DetailKey,
   tree: false,
   jumpFast: false,
+  /** 单线：闭运算 + 骨架化，把描线两侧的平行双边并成一条中心线 */
+  lineMode: 'double' as 'double' | 'single',
+  lineRadius: DETAIL.medium.lineRadius,
   circleMode: 'energy' as 'energy' | 'count',
   /** CIRCLE_PRESETS 的下标；−1 表示滑块自定义 */
   preset: 1,
@@ -43,6 +49,9 @@ const state = {
   expanded: false,
   result: null as PipelineResult | null,
   trace: null as { x: Float64Array; y: Float64Array } | null,
+  /** 原图色模式下每个采样点的颜色；单色模式为 null */
+  colors: null as TraceColors | null,
+  colorCss: [] as (string | null)[],
 };
 
 const view = {
@@ -53,6 +62,10 @@ const view = {
   follow: false,
   grow: false,
   jumps: 'dashed' as 'dashed' | 'hidden' | 'solid',
+  color: 'mono' as 'mono' | 'source',
+  colorOffset: 4,
+  liftDark: true,
+  minL: 0.45,
 };
 
 const anim = {
@@ -78,7 +91,7 @@ const anim = {
   exportingGif: false,
 };
 
-const stats = { circlesDrawn: 0, frame: 0 };
+const stats = { circlesDrawn: 0, frame: 0, layerRedraws: 0 };
 
 // ---------- Worker 与缓存 ----------
 
@@ -118,8 +131,9 @@ async function recompute() {
   const src = state.source;
   if (!src) return;
   const opts: PipelineOptions = { detail: state.detail, tree: state.tree, jumpWeight: state.jumpFast ? JUMP_FAST_WEIGHT : 1 };
+  if (singleLine()) opts.lineRadius = state.lineRadius;
   const srcKey = src.kind === 'image' ? `img:${src.hash}:${state.mode}` : `curve:${src.id}`;
-  const key = [srcKey, opts.detail, opts.tree, opts.jumpWeight].join('|');
+  const key = [srcKey, opts.detail, opts.tree, opts.jumpWeight, opts.lineRadius ? `single${opts.lineRadius}` : 'double'].join('|');
   let res = cache.get(key);
   if (!res) {
     const id = ++reqId;
@@ -142,8 +156,49 @@ async function recompute() {
   setBusy(null);
   state.result = res;
   anim.pos = 0;
+  recolor();
   renderStats();
   applyM(resolveM());
+}
+
+/** 单线模式只对图片的边缘检测有意义 */
+function singleLine(): boolean {
+  return state.lineMode === 'single' && state.mode === 'edge' && state.source?.kind === 'image';
+}
+
+/** 实际取色偏移：单线模式下骨架在描线正中，d 至少要比 r 大 */
+function colorOffset(): number {
+  return singleLine() ? Math.max(view.colorOffset, Math.ceil(state.lineRadius) + 1) : view.colorOffset;
+}
+
+function recolor() {
+  const res = state.result, src = state.source;
+  state.colors = null;
+  state.colorCss = [];
+  const d = colorOffset();
+  $('colorOffsetVal').textContent = d === view.colorOffset ? `${d} px` : `${d} px*`;
+  $('colorOffsetVal').title = d === view.colorOffset ? '' : `单线模式下至少 r + 1 = ${d} px`;
+  $('minLVal').textContent = view.liftDark ? view.minL.toFixed(2) : '关';
+  if (view.color !== 'source' || !res || src?.kind !== 'image' || res.sampled.flipH === null) return;
+  const c = traceColors(res.sampled, src.rgba, src.w, src.h, { offset: d, minL: view.liftDark ? view.minL : null });
+  state.colors = c;
+  // 低两位抹掉，相邻同色的段能合成一条路径
+  state.colorCss = Array.from(c.ok, (ok, n) =>
+    ok ? `rgb(${c.rgb[3 * n] & 0xfc},${c.rgb[3 * n + 1] & 0xfc},${c.rgb[3 * n + 2] & 0xfc})` : null,
+  );
+}
+
+function updateSourceUI() {
+  const img = state.source?.kind === 'image';
+  document.querySelectorAll<HTMLButtonElement>('#lineMode button').forEach((b) => (b.disabled = !img || state.mode !== 'edge'));
+  setSeg('lineMode', state.lineMode);
+  $('lineRadiusRow').hidden = !singleLine();
+  $<HTMLInputElement>('lineRadius').value = String(state.lineRadius);
+  $('lineRadiusVal').textContent = `${state.lineRadius} px`;
+  const srcBtn = document.querySelector<HTMLButtonElement>('#vColor button[data-v="source"]')!;
+  srcBtn.disabled = !img;
+  setSeg('vColor', view.color);
+  $('colorOpts').hidden = view.color !== 'source' || !img;
 }
 
 function renderStats() {
@@ -330,6 +385,8 @@ function computeNodes(m: number, pos: number, useRotors: boolean) {
 }
 
 function draw() {
+  // 画布不可见（尺寸为 0）时不画，否则 WebGL 离屏画布也是 0×0，drawImage 会抛错让动画循环中断
+  if (canvas.width < 1 || canvas.height < 1 || cssW < 1 || cssH < 1) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const res = state.result;
   const tr = view.grow ? anim.growTrace : state.trace;
@@ -368,7 +425,7 @@ function draw() {
 function paint(g: CanvasRenderingContext2D, W: number, H: number, ratio: number, sc: Scene) {
   const res = state.result!;
   const N = res.spec.N;
-  const { tr, z, ox, oy } = sc;
+  const { z, ox, oy } = sc;
   const sx = (v: number) => ox + z * v;
   const sy = (v: number) => oy - z * v;
   g.fillStyle = BG;
@@ -401,35 +458,8 @@ function paint(g: CanvasRenderingContext2D, W: number, H: number, ratio: number,
   }
 
   // 笔迹：按 t 揭开；跳线所在区间画淡或隐藏
-  const J = res.sampled.jump;
-  const solid = new Path2D();
-  const dashed = new Path2D();
-  let last = -1; // 0 实线 1 跳线 2 断开
-  const kindOf = (i: number) => (J[i] && view.jumps !== 'solid' ? (view.jumps === 'hidden' ? 2 : 1) : 0);
-  const segTo = (i: number, x1: number, y1: number) => {
-    const kd = kindOf(i % N);
-    if (kd === 2) {
-      last = 2;
-      return;
-    }
-    const path = kd === 0 ? solid : dashed;
-    if (kd !== last) path.moveTo(sx(tr.x[i % N]), sy(tr.y[i % N]));
-    path.lineTo(x1, y1);
-    last = kd;
-  };
-  for (let i = 0; i < sc.end; i++) {
-    const j = (i + 1) % N;
-    segTo(i, sx(tr.x[j]), sy(tr.y[j]));
-  }
-  if (sc.partial) segTo(sc.end, sx(sc.penX), sy(sc.penY));
-  g.setLineDash([4, 5]);
-  g.strokeStyle = 'rgba(255,210,122,0.28)';
-  g.lineWidth = 1.2;
-  g.stroke(dashed);
-  g.setLineDash([]);
-  g.strokeStyle = '#ffd27a';
-  g.lineWidth = 2;
-  g.stroke(solid);
+  if (state.colors) paintColoredTrace(g, W, H, ratio, sc);
+  else strokeMonoTrace(g, sc);
 
   if (view.circles) drawCircles(g, W, H, ratio, sc);
 
@@ -462,6 +492,149 @@ function paint(g: CanvasRenderingContext2D, W: number, H: number, ratio: number,
   g.arc(sx(sc.penX), sy(sc.penY), 3, 0, 2 * Math.PI);
   g.fillStyle = '#fff4d6';
   g.fill();
+}
+
+/** 单色笔迹：整条重画（与加入原图色之前完全相同） */
+function strokeMonoTrace(g: CanvasRenderingContext2D, sc: Scene) {
+  const N = state.result!.spec.N;
+  const { tr, z, ox, oy } = sc;
+  const sx = (v: number) => ox + z * v;
+  const sy = (v: number) => oy - z * v;
+  const J = state.result!.sampled.jump;
+  const solid = new Path2D();
+  const dashed = new Path2D();
+  let last = -1; // 0 实线 1 跳线 2 断开
+  const kindOf = (i: number) => (J[i] && view.jumps !== 'solid' ? (view.jumps === 'hidden' ? 2 : 1) : 0);
+  const segTo = (i: number, x1: number, y1: number) => {
+    const kd = kindOf(i % N);
+    if (kd === 2) {
+      last = 2;
+      return;
+    }
+    const path = kd === 0 ? solid : dashed;
+    if (kd !== last) path.moveTo(sx(tr.x[i % N]), sy(tr.y[i % N]));
+    path.lineTo(x1, y1);
+    last = kd;
+  };
+  for (let i = 0; i < sc.end; i++) {
+    const j = (i + 1) % N;
+    segTo(i, sx(tr.x[j]), sy(tr.y[j]));
+  }
+  if (sc.partial) segTo(sc.end, sx(sc.penX), sy(sc.penY));
+  g.setLineDash([4, 5]);
+  g.strokeStyle = JUMP_CSS;
+  g.lineWidth = 1.2;
+  g.stroke(dashed);
+  g.setLineDash([]);
+  g.strokeStyle = TRACE_CSS;
+  g.lineWidth = 2;
+  g.stroke(solid);
+}
+
+/**
+ * 原图色笔迹：画第 from 到 to 段。第 i 段从笔迹点 i 连到 i + 1，用第 i 个采样点的颜色；
+ * 相邻同色的段合成一条路径。跳线不上色，按「跳线」选项画。
+ */
+function strokeColored(g: CanvasRenderingContext2D, sc: Scene, from: number, to: number) {
+  const N = state.result!.spec.N;
+  const J = state.result!.sampled.jump;
+  const css = state.colorCss;
+  const { tr, z, ox, oy } = sc;
+  const X = (n: number) => ox + z * tr.x[n];
+  const Y = (n: number) => oy - z * tr.y[n];
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
+  if (view.jumps !== 'hidden') {
+    const p = new Path2D();
+    let open = false;
+    for (let i = from; i < to; i++) {
+      const a = i % N;
+      if (!J[a]) {
+        open = false;
+        continue;
+      }
+      if (!open) p.moveTo(X(a), Y(a));
+      p.lineTo(X((i + 1) % N), Y((i + 1) % N));
+      open = true;
+    }
+    g.setLineDash(view.jumps === 'dashed' ? [4, 5] : []);
+    g.strokeStyle = view.jumps === 'dashed' ? JUMP_CSS : TRACE_CSS;
+    g.lineWidth = view.jumps === 'dashed' ? 1.2 : 2;
+    g.stroke(p);
+    g.setLineDash([]);
+  }
+  g.lineWidth = 2;
+  let i = from;
+  while (i < to) {
+    const a = i % N;
+    if (J[a]) {
+      i++;
+      continue;
+    }
+    const color = css[a] ?? TRACE_CSS;
+    g.beginPath();
+    g.moveTo(X(a), Y(a));
+    while (i < to && !J[i % N] && (css[i % N] ?? TRACE_CSS) === color) {
+      g.lineTo(X((i + 1) % N), Y((i + 1) % N));
+      i++;
+    }
+    g.strokeStyle = color;
+    g.stroke();
+  }
+}
+
+/**
+ * 常驻的笔迹层：画面不变时每帧只补画新揭开的几段；笔迹、颜色、镜头、尺寸或跳线样式变了，
+ * 或者往回拖了时间轴，才整体重画。离屏导出（GIF）不走这一层，直接整条画。
+ */
+const traceLayer = {
+  canvas: document.createElement('canvas'),
+  tr: null as Scene['tr'] | null,
+  colors: null as TraceColors | null,
+  jumps: '',
+  z: 0,
+  ox: 0,
+  oy: 0,
+  drawn: 0,
+};
+const layerCtx = traceLayer.canvas.getContext('2d')!;
+
+function paintColoredTrace(g: CanvasRenderingContext2D, W: number, H: number, ratio: number, sc: Scene) {
+  const N = state.result!.spec.N;
+  if (g !== ctx) {
+    strokeColored(g, sc, 0, sc.end);
+  } else {
+    const L = traceLayer;
+    const same =
+      L.tr === sc.tr && L.colors === state.colors && L.jumps === view.jumps &&
+      L.canvas.width === canvas.width && L.canvas.height === canvas.height &&
+      Math.abs(L.z - sc.z) < 1e-6 && Math.abs(L.ox - sc.ox) < 1e-3 && Math.abs(L.oy - sc.oy) < 1e-3;
+    if (!same || sc.end < L.drawn) {
+      if (L.canvas.width !== canvas.width || L.canvas.height !== canvas.height) {
+        L.canvas.width = canvas.width;
+        L.canvas.height = canvas.height;
+      }
+      layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+      layerCtx.clearRect(0, 0, L.canvas.width, L.canvas.height);
+      layerCtx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      Object.assign(L, { tr: sc.tr, colors: state.colors, jumps: view.jumps, z: sc.z, ox: sc.ox, oy: sc.oy, drawn: 0 });
+      stats.layerRedraws++;
+    }
+    if (sc.end > L.drawn) {
+      strokeColored(layerCtx, sc, L.drawn, sc.end);
+      L.drawn = sc.end;
+    }
+    g.drawImage(L.canvas, 0, 0, W, H);
+  }
+  // 最后一个采样点到笔尖这一小段每帧都在变，直接画
+  const e = sc.end % N;
+  if (!sc.partial || state.result!.sampled.jump[e]) return;
+  g.beginPath();
+  g.moveTo(sc.ox + sc.z * sc.tr.x[e], sc.oy - sc.z * sc.tr.y[e]);
+  g.lineTo(sc.ox + sc.z * sc.penX, sc.oy - sc.z * sc.penY);
+  g.strokeStyle = state.colorCss[e] ?? TRACE_CSS;
+  g.lineWidth = 2;
+  g.stroke();
 }
 
 /**
@@ -503,6 +676,8 @@ function drawCircles(g: CanvasRenderingContext2D, W: number, H: number, ratio: n
     circleBuf[3 * count + 2] = r * ratio;
     count++;
   }
+  stats.circlesDrawn = count;
+  if (count === 0) return;
   glCircles.draw(Math.round(W * ratio), Math.round(H * ratio), circleBuf, count, ratio, CIRCLE_RGBA);
   g.drawImage(glCircles.canvas, 0, 0, W, H);
   stats.circlesDrawn = count;
@@ -580,7 +755,9 @@ function frame() {
   draw();
   if (++stats.frame % 20 === 0) {
     const how = glCircles && !glCircles.lost ? 'WebGL2' : `Canvas 2D（最多 ${MAX_DRAWN_CIRCLES} 个）`;
-    $('drawInfo').textContent = view.circles ? `圆渲染：${how} · 本帧画了 ${stats.circlesDrawn} 个` : '';
+    const circles = view.circles ? `圆渲染：${how} · 本帧画了 ${stats.circlesDrawn} 个` : '';
+    const layer = state.colors ? `原图色笔迹层：整体重画过 ${stats.layerRedraws} 次` : '';
+    $('drawInfo').textContent = [circles, layer].filter(Boolean).join(' · ');
   }
   requestAnimationFrame(frame);
 }
@@ -684,6 +861,7 @@ function setSource(src: Source, mode?: 'edge' | 'silhouette') {
   if (mode) state.mode = mode;
   $('sourceName').textContent = src.name;
   setSeg('mode', state.mode);
+  updateSourceUI();
   document.querySelectorAll<HTMLButtonElement>('#mode button').forEach((b) => (b.disabled = src.kind === 'curve'));
   document.querySelectorAll<HTMLButtonElement>('#curves button').forEach((b) => b.classList.toggle('on', src.kind === 'curve' && b.dataset.v === src.id));
   recompute();
@@ -737,15 +915,30 @@ function setupControls() {
   setSeg('detail', state.detail);
   setSeg('tour', state.tree ? 'tree' : 'greedy');
   setSeg('vJumps', view.jumps);
+  updateSourceUI();
   setSeg('eqForm', state.form);
   updateCircleUI();
 
   onSeg('mode', (v) => {
     state.mode = v as typeof state.mode;
+    updateSourceUI();
     recompute();
   });
   onSeg('detail', (v) => {
     state.detail = v as DetailKey;
+    state.lineRadius = DETAIL[state.detail].lineRadius;
+    updateSourceUI();
+    recompute();
+  });
+  onSeg('lineMode', (v) => {
+    state.lineMode = v as typeof state.lineMode;
+    updateSourceUI();
+    recompute();
+  });
+  const lineRadius = $<HTMLInputElement>('lineRadius');
+  lineRadius.addEventListener('input', () => ($('lineRadiusVal').textContent = `${lineRadius.value} px`));
+  lineRadius.addEventListener('change', () => {
+    state.lineRadius = +lineRadius.value;
     recompute();
   });
   onSeg('tour', (v) => {
@@ -794,6 +987,21 @@ function setupControls() {
   bindView('vFollow', 'follow');
   bindView('vGrow', 'grow');
   onSeg('vJumps', (v) => (view.jumps = v as typeof view.jumps));
+  onSeg('vColor', (v) => {
+    view.color = v as typeof view.color;
+    updateSourceUI();
+    recolor();
+  });
+  const colorInput = (id: string, apply: (el: HTMLInputElement) => void) => {
+    const el = $<HTMLInputElement>(id);
+    el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', () => {
+      apply(el);
+      recolor();
+    });
+  };
+  colorInput('colorOffset', (el) => (view.colorOffset = +el.value));
+  colorInput('minL', (el) => (view.minL = +el.value));
+  colorInput('liftDark', (el) => (view.liftDark = el.checked));
 
   const play = $('play');
   const setPlaying = (p: boolean) => {

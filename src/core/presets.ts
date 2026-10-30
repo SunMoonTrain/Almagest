@@ -15,12 +15,14 @@ export interface DetailPreset {
   tol: number;
   maxChains: number;
   N: number;
+  /** 单线模式的闭运算半径 r（像素，按缩放后的图算） */
+  lineRadius: number;
 }
 
 export const DETAIL: Record<DetailKey, DetailPreset> = {
-  coarse: { label: '粗', sigma: 3.0, highPct: 0.95, lowRatio: 0.4, minLenFrac: 0.05, tol: 2.0, maxChains: 30, N: 2048 },
-  medium: { label: '中', sigma: 1.5, highPct: 0.9, lowRatio: 0.4, minLenFrac: 0.01, tol: 1.0, maxChains: 150, N: 4096 },
-  fine: { label: '细', sigma: 0.8, highPct: 0.8, lowRatio: 0.4, minLenFrac: 0.002, tol: 0.5, maxChains: 600, N: 8192 },
+  coarse: { label: '粗', sigma: 3.0, highPct: 0.95, lowRatio: 0.4, minLenFrac: 0.05, tol: 2.0, maxChains: 30, N: 2048, lineRadius: 3 },
+  medium: { label: '中', sigma: 1.5, highPct: 0.9, lowRatio: 0.4, minLenFrac: 0.01, tol: 1.0, maxChains: 150, N: 4096, lineRadius: 2 },
+  fine: { label: '细', sigma: 0.8, highPct: 0.8, lowRatio: 0.4, minLenFrac: 0.002, tol: 0.5, maxChains: 600, N: 8192, lineRadius: 1.5 },
 };
 
 export const DETAIL_KEYS: DetailKey[] = ['coarse', 'medium', 'fine'];
