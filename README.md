@@ -2,6 +2,8 @@
 
 任意图片 → 一笔画闭合曲线 → 圆套圆（本轮均轮）绘制动画 → 可复制的参数方程。设计见 [技术方案](图片转托勒密圆绘制工具%20·%20技术方案.md)。
 
+管线逐步讲解（带插图）见 [docs/pipeline.md](docs/pipeline.md)。
+
 ```bash
 npm install
 npm run dev     # 开发服务器
@@ -25,3 +27,4 @@ npm run build   # 产出 dist/，纯静态，可直接托管
 | `src/gif.ts` | 导出 GIF（全局调色板，离屏逐帧渲染） |
 | `equation.ts` | 7. 复数 / 相位 / 三角级数三种 LaTeX、Desmos 文本、系数 JSON |
 | `presets.ts` | 两组档位的数值 |
+| `scripts/doc-figures.ts` | 生成 `docs/img/` 下的插图：`npx vite-node scripts/doc-figures.ts` |
