@@ -6,6 +6,8 @@ import { DEMO_CURVES } from './core/curves';
 import { circleLimit, countForEnergy, energyKept, termsOf, traceCurve } from './core/fourier';
 import { coefficientsJSON, desmosText, equationLatex, type EqForm, type EqOptions } from './core/equation';
 import type { PipelineInput, PipelineOptions, PipelineResult } from './core/pipeline';
+import { GLCircles } from './glCircles';
+import { encodeGif } from './gif';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -15,8 +17,13 @@ type Source =
 
 /** 每画一圈的秒数 */
 const SPEEDS = [60, 30, 20, 12, 8, 4, 2];
-/** 圆特别多时只画半径最大的这么多个 */
+/** 没有 WebGL 时只画半径最大的这么多个圆 */
 const MAX_DRAWN_CIRCLES = 200;
+const FOLLOW_ZOOM = 6;
+const BG = '#0a0d16';
+const CIRCLE_RGBA: [number, number, number, number] = [143 / 255, 176 / 255, 1, 0.22];
+const CIRCLE_RGBA_CSS = 'rgba(143,176,255,0.22)';
+const GIF = { size: 480, frames: 120, holdFrames: 25, delayMs: 50 };
 /** 公式超过这么多项时折叠显示 */
 const FOLD_OVER = 12;
 const FOLD_SHOW = 8;
@@ -67,7 +74,10 @@ const anim = {
   growTrace: null as { x: Float64Array; y: Float64Array } | null,
   recorder: null as MediaRecorder | null,
   scrubbing: false,
+  exportingGif: false,
 };
+
+const stats = { circlesDrawn: 0, frame: 0 };
 
 // ---------- Worker 与缓存 ----------
 
@@ -270,6 +280,8 @@ function growStep() {
 const canvas = $<HTMLCanvasElement>('canvas');
 const ctx = canvas.getContext('2d')!;
 let cssW = 0, cssH = 0, dpr = 1;
+const glCircles = GLCircles.create();
+let circleBuf = new Float32Array(0);
 
 function resize() {
   dpr = window.devicePixelRatio || 1;
@@ -280,72 +292,112 @@ function resize() {
 }
 new ResizeObserver(resize).observe(canvas);
 
-function draw() {
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.fillStyle = '#0a0d16';
-  ctx.fillRect(0, 0, cssW, cssH);
-  const res = state.result;
-  const tr = view.grow ? anim.growTrace : state.trace;
-  if (!res || !tr) return;
-  const spec = res.spec;
-  const N = spec.N;
-  const m = view.grow ? anim.growM : state.M;
+/** 一帧画面需要的全部量；屏幕坐标 = (ox + z·x, oy − z·y)，单位是 CSS 像素 */
+interface Scene {
+  m: number;
+  tr: { x: Float64Array; y: Float64Array };
+  /** 笔迹揭开到第几个采样点 */
+  end: number;
+  /** 是否从最后一个采样点连到笔尖 */
+  partial: boolean;
+  penX: number;
+  penY: number;
+  z: number;
+  ox: number;
+  oy: number;
+}
 
-  // 箭头链：大的接在根部，小的在笔尖
+/** 箭头链：大的接在根部，小的在笔尖。useRotors = false 时直接用三角函数（离屏导出用）。 */
+function computeNodes(m: number, pos: number, useRotors: boolean) {
+  const spec = state.result!.spec;
   const nx = anim.nodesX, ny = anim.nodesY;
+  const t = (2 * Math.PI * pos) / spec.N;
   let x = spec.c0re, y = spec.c0im;
   nx[0] = x;
   ny[0] = y;
   for (let j = 0; j < m; j++) {
-    x += spec.re[j] * anim.rr[j] - spec.im[j] * anim.ri[j];
-    y += spec.re[j] * anim.ri[j] + spec.im[j] * anim.rr[j];
+    const c = useRotors ? anim.rr[j] : Math.cos(spec.k[j] * t);
+    const s = useRotors ? anim.ri[j] : Math.sin(spec.k[j] * t);
+    x += spec.re[j] * c - spec.im[j] * s;
+    y += spec.re[j] * s + spec.im[j] * c;
     nx[j + 1] = x;
     ny[j + 1] = y;
   }
-  const penX = x, penY = y;
+}
 
-  // 镜头
+function draw() {
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const res = state.result;
+  const tr = view.grow ? anim.growTrace : state.trace;
+  if (!res || !tr) {
+    ctx.fillStyle = BG;
+    ctx.fillRect(0, 0, cssW, cssH);
+    return;
+  }
+  const N = res.spec.N;
+  const m = view.grow ? anim.growM : state.M;
+  computeNodes(m, anim.pos, true);
+  const penX = anim.nodesX[m], penY = anim.nodesY[m];
+
+  // 镜头：平滑地放大并跟随笔尖
   const base = (Math.min(cssW, cssH) * 0.42) / 100;
-  const targetZoom = view.follow ? 6 : 1;
+  const targetZoom = view.follow ? FOLLOW_ZOOM : 1;
   anim.zoom += (targetZoom - anim.zoom) * 0.12;
-  const followAmt = (anim.zoom - 1) / 5;
+  const followAmt = (anim.zoom - 1) / (FOLLOW_ZOOM - 1);
   anim.camX += (penX * followAmt - anim.camX) * 0.25;
   anim.camY += (penY * followAmt - anim.camY) * 0.25;
   const z = base * anim.zoom;
-  const ox = cssW / 2 - z * anim.camX;
-  const oy = cssH / 2 + z * anim.camY;
+  paint(ctx, cssW, cssH, dpr, {
+    m,
+    tr,
+    end: view.grow ? N : Math.floor(anim.pos),
+    partial: !view.grow,
+    penX,
+    penY,
+    z,
+    ox: cssW / 2 - z * anim.camX,
+    oy: cssH / 2 + z * anim.camY,
+  });
+}
+
+/** g 的当前变换须为 scale(ratio)；W、H 为 CSS 像素。 */
+function paint(g: CanvasRenderingContext2D, W: number, H: number, ratio: number, sc: Scene) {
+  const res = state.result!;
+  const N = res.spec.N;
+  const { tr, z, ox, oy } = sc;
   const sx = (v: number) => ox + z * v;
   const sy = (v: number) => oy - z * v;
+  g.fillStyle = BG;
+  g.fillRect(0, 0, W, H);
 
   // 原图叠底
   const src = state.source;
   if (view.image && src?.kind === 'image' && res.sampled.flipH !== null) {
     const s = res.sampled;
     const k = z * s.scale;
-    ctx.save();
-    ctx.globalAlpha = 0.22;
-    ctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * (ox - k * s.cx), dpr * (oy - k * (s.flipH! - s.cy)));
-    ctx.drawImage(src.canvas, 0, 0);
-    ctx.restore();
+    g.save();
+    g.globalAlpha = 0.22;
+    g.setTransform(ratio * k, 0, 0, ratio * k, ratio * (ox - k * s.cx), ratio * (oy - k * (s.flipH! - s.cy)));
+    g.drawImage(src.canvas, 0, 0);
+    g.restore();
   }
 
-  ctx.lineCap = 'round';
-  ctx.lineJoin = 'round';
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
 
   // 目标曲线
   if (view.target) {
     const s = res.sampled;
-    ctx.beginPath();
-    for (let n = 0; n < N; n++) ctx.lineTo(sx(s.x[n]), sy(s.y[n]));
-    ctx.closePath();
-    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
+    g.beginPath();
+    for (let n = 0; n < N; n++) g.lineTo(sx(s.x[n]), sy(s.y[n]));
+    g.closePath();
+    g.strokeStyle = 'rgba(255,255,255,0.22)';
+    g.lineWidth = 1;
+    g.stroke();
   }
 
   // 笔迹：按 t 揭开；跳线所在区间画淡或隐藏
   const J = res.sampled.jump;
-  const end = view.grow ? N : Math.floor(anim.pos);
   const solid = new Path2D();
   const dashed = new Path2D();
   let last = -1; // 0 实线 1 跳线 2 断开
@@ -361,64 +413,135 @@ function draw() {
     path.lineTo(x1, y1);
     last = kd;
   };
-  for (let i = 0; i < end; i++) {
+  for (let i = 0; i < sc.end; i++) {
     const j = (i + 1) % N;
     segTo(i, sx(tr.x[j]), sy(tr.y[j]));
   }
-  if (!view.grow) segTo(end, sx(penX), sy(penY));
-  ctx.setLineDash([4, 5]);
-  ctx.strokeStyle = 'rgba(255,210,122,0.28)';
-  ctx.lineWidth = 1.2;
-  ctx.stroke(dashed);
-  ctx.setLineDash([]);
-  ctx.strokeStyle = '#ffd27a';
-  ctx.lineWidth = 2;
-  ctx.stroke(solid);
+  if (sc.partial) segTo(sc.end, sx(sc.penX), sy(sc.penY));
+  g.setLineDash([4, 5]);
+  g.strokeStyle = 'rgba(255,210,122,0.28)';
+  g.lineWidth = 1.2;
+  g.stroke(dashed);
+  g.setLineDash([]);
+  g.strokeStyle = '#ffd27a';
+  g.lineWidth = 2;
+  g.stroke(solid);
 
-  // 圆：小于 0.5 像素的不画，但仍参与求和
-  if (view.circles) {
-    ctx.beginPath();
-    const lim = Math.min(m, MAX_DRAWN_CIRCLES);
-    for (let j = 0; j < lim; j++) {
-      const r = spec.r[j] * z;
-      if (r < 0.5) break;
-      const cx = sx(nx[j]), cy = sy(ny[j]);
-      ctx.moveTo(cx + r, cy);
-      ctx.arc(cx, cy, r, 0, 2 * Math.PI);
-    }
-    ctx.strokeStyle = 'rgba(143,176,255,0.22)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  }
+  if (view.circles) drawCircles(g, W, H, ratio, sc);
 
   // 箭头
+  const nx = anim.nodesX, ny = anim.nodesY;
   if (view.arrows) {
-    ctx.beginPath();
-    ctx.moveTo(sx(nx[0]), sy(ny[0]));
-    for (let j = 1; j <= m; j++) ctx.lineTo(sx(nx[j]), sy(ny[j]));
-    ctx.strokeStyle = 'rgba(220,230,255,0.75)';
-    ctx.lineWidth = 1.2;
-    ctx.stroke();
-    ctx.beginPath();
-    for (let j = 0; j < Math.min(m, 80); j++) {
+    g.beginPath();
+    g.moveTo(sx(nx[0]), sy(ny[0]));
+    for (let j = 1; j <= sc.m; j++) g.lineTo(sx(nx[j]), sy(ny[j]));
+    g.strokeStyle = 'rgba(220,230,255,0.75)';
+    g.lineWidth = 1.2;
+    g.stroke();
+    g.beginPath();
+    for (let j = 0; j < Math.min(sc.m, 80); j++) {
       const ax = sx(nx[j]), ay = sy(ny[j]), bx = sx(nx[j + 1]), by = sy(ny[j + 1]);
       const len = Math.hypot(bx - ax, by - ay);
       if (len < 10) continue;
       const hs = Math.min(7, len * 0.25);
       const ux = (bx - ax) / len, uy = (by - ay) / len;
-      ctx.moveTo(bx, by);
-      ctx.lineTo(bx - hs * ux - hs * 0.45 * uy, by - hs * uy + hs * 0.45 * ux);
-      ctx.lineTo(bx - hs * ux + hs * 0.45 * uy, by - hs * uy - hs * 0.45 * ux);
-      ctx.closePath();
+      g.moveTo(bx, by);
+      g.lineTo(bx - hs * ux - hs * 0.45 * uy, by - hs * uy + hs * 0.45 * ux);
+      g.lineTo(bx - hs * ux + hs * 0.45 * uy, by - hs * uy - hs * 0.45 * ux);
+      g.closePath();
     }
-    ctx.fillStyle = 'rgba(220,230,255,0.75)';
-    ctx.fill();
+    g.fillStyle = 'rgba(220,230,255,0.75)';
+    g.fill();
   }
 
-  ctx.beginPath();
-  ctx.arc(sx(penX), sy(penY), 3, 0, 2 * Math.PI);
-  ctx.fillStyle = '#fff4d6';
-  ctx.fill();
+  g.beginPath();
+  g.arc(sx(sc.penX), sy(sc.penY), 3, 0, 2 * Math.PI);
+  g.fillStyle = '#fff4d6';
+  g.fill();
+}
+
+/**
+ * 小于 0.5 像素的圆不画，但仍参与求和。有 WebGL2 时全部画出（只剔除完全在画面外的），
+ * 否则退回 Canvas 2D，只画半径最大的 MAX_DRAWN_CIRCLES 个。
+ */
+function drawCircles(g: CanvasRenderingContext2D, W: number, H: number, ratio: number, sc: Scene) {
+  const spec = state.result!.spec;
+  const nx = anim.nodesX, ny = anim.nodesY;
+  const useGL = glCircles !== null && !glCircles.lost;
+  const lim = useGL ? sc.m : Math.min(sc.m, MAX_DRAWN_CIRCLES);
+  if (!useGL) {
+    g.beginPath();
+    for (let j = 0; j < lim; j++) {
+      const r = spec.r[j] * sc.z;
+      if (r < 0.5) break;
+      const cx = sc.ox + sc.z * nx[j], cy = sc.oy - sc.z * ny[j];
+      g.moveTo(cx + r, cy);
+      g.arc(cx, cy, r, 0, 2 * Math.PI);
+    }
+    g.strokeStyle = CIRCLE_RGBA_CSS;
+    g.lineWidth = 1;
+    g.stroke();
+    stats.circlesDrawn = lim;
+    return;
+  }
+  if (circleBuf.length < lim * 3) circleBuf = new Float32Array(lim * 3);
+  let count = 0;
+  for (let j = 0; j < lim; j++) {
+    const r = spec.r[j] * sc.z;
+    if (r < 0.5) break;
+    const cx = sc.ox + sc.z * nx[j], cy = sc.oy - sc.z * ny[j];
+    // 剔除：圆环完全在画面外，或画面完全落在圆内
+    if (cx + r < 0 || cx - r > W || cy + r < 0 || cy - r > H) continue;
+    const far = Math.hypot(Math.max(cx, W - cx), Math.max(cy, H - cy));
+    if (far < r - 1) continue;
+    circleBuf[3 * count] = cx * ratio;
+    circleBuf[3 * count + 1] = cy * ratio;
+    circleBuf[3 * count + 2] = r * ratio;
+    count++;
+  }
+  glCircles.draw(Math.round(W * ratio), Math.round(H * ratio), circleBuf, count, ratio, CIRCLE_RGBA);
+  g.drawImage(glCircles.canvas, 0, 0, W, H);
+  stats.circlesDrawn = count;
+}
+
+/** 离屏渲染一整圈并编码为 GIF。用当前的圆数、显示开关和镜头模式；不含「逐渐加圆」。 */
+async function exportGif() {
+  const res = state.result, tr = state.trace;
+  if (!res || !tr || anim.exportingGif) return;
+  const M = state.M, N = res.spec.N;
+  const btn = $<HTMLButtonElement>('exportGif');
+  anim.exportingGif = true;
+  btn.disabled = true;
+  try {
+    const blob = await encodeGif(
+      GIF,
+      (g, S, p) => {
+        const pos = p >= 1 ? 0 : p * N;
+        computeNodes(M, pos, false);
+        const penX = anim.nodesX[M], penY = anim.nodesY[M];
+        const z = ((S * 0.42) / 100) * (view.follow ? FOLLOW_ZOOM : 1);
+        const camX = view.follow ? penX : 0, camY = view.follow ? penY : 0;
+        paint(g, S, S, 1, {
+          m: M, tr, end: p >= 1 ? N : Math.floor(pos), partial: p < 1, penX, penY, z,
+          ox: S / 2 - z * camX, oy: S / 2 + z * camY,
+        });
+      },
+      (done, total) => {
+        btn.textContent = `生成中 ${Math.round((done / total) * 100)}%`;
+        return state.result === res && state.M === M;
+      },
+    );
+    if (blob) {
+      download(blob, 'almagest.gif');
+      toast(`已导出 GIF（${(blob.size / 1024 / 1024).toFixed(1)} MB）`);
+    } else {
+      toast('圆数或图片变了，GIF 导出已中止');
+    }
+  } finally {
+    anim.exportingGif = false;
+    btn.disabled = false;
+    btn.textContent = '导出 GIF';
+  }
 }
 
 const timeline = $<HTMLInputElement>('timeline');
@@ -431,6 +554,10 @@ function frame() {
   }
   if (eqDirty) renderEquation();
   draw();
+  if (++stats.frame % 20 === 0) {
+    const how = glCircles && !glCircles.lost ? 'WebGL2' : `Canvas 2D（最多 ${MAX_DRAWN_CIRCLES} 个）`;
+    $('drawInfo').textContent = view.circles ? `圆渲染：${how} · 本帧画了 ${stats.circlesDrawn} 个` : '';
+  }
   requestAnimationFrame(frame);
 }
 
@@ -701,6 +828,7 @@ function setupControls() {
     const json = coefficientsJSON({ N: s.N, scale: s.scale, center: { x: s.cx, y: s.cy }, imageHeight: s.flipH }, c0, terms);
     download(new Blob([json], { type: 'application/json' }), 'almagest-coefficients.json');
   });
+  $('exportGif').addEventListener('click', exportGif);
   $('record').addEventListener('click', () => {
     if (!state.result) return;
     if (anim.recorder) {

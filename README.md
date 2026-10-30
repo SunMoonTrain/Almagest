@@ -21,5 +21,7 @@ npm run build   # 产出 dist/，纯静态，可直接托管
 | `resample.ts` | 4. y 翻转、归一化（最长半边 = 100）、按弧长重采样 |
 | `fft.ts` / `fourier.ts` | 5. 系数（按半径降序）、能量截断、逆变换预计算笔迹 |
 | `src/main.ts` | 6. 动画（转子 + 每圈校准）、交互、导出 |
+| `src/glCircles.ts` | 圆的 WebGL2 实例化渲染（不可用时退回 Canvas 2D） |
+| `src/gif.ts` | 导出 GIF（全局调色板，离屏逐帧渲染） |
 | `equation.ts` | 7. 复数 / 相位 / 三角级数三种 LaTeX、Desmos 文本、系数 JSON |
 | `presets.ts` | 两组档位的数值 |
