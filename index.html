@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Almagest · 托勒密圆绘制</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%23ffd27a' stroke-width='2'/%3E%3Ccircle cx='24' cy='12' r='5' fill='none' stroke='%238fb0ff' stroke-width='2'/%3E%3C/svg%3E" />
+  </head>
+  <body>
+    <div id="app">
+      <header class="top">
+        <div class="brand">
+          <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
+            <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2" />
+            <circle cx="24" cy="12" r="5" fill="none" stroke="var(--accent-2)" stroke-width="2" />
+          </svg>
+          <b>Almagest</b>
+          <span class="sub">任意图片 → 一笔画 → 本轮套均轮 → 参数方程</span>
+        </div>
+        <div class="source" id="sourceName"></div>
+      </header>
+
+      <aside class="panel">
+        <section>
+          <h3>输入</h3>
+          <div class="row">
+            <label class="btn primary">选择图片<input type="file" id="file" accept="image/*" hidden /></label>
+            <span class="hint">或拖入 / 粘贴</span>
+          </div>
+          <div class="row">
+            <input id="text" value="π" maxlength="16" aria-label="文字" />
+            <button id="textBtn">用文字</button>
+          </div>
+          <div class="chips" id="curves"></div>
+        </section>
+
+        <section>
+          <h3>描边方式</h3>
+          <div class="seg" id="mode">
+            <button data-v="edge">边缘检测</button>
+            <button data-v="silhouette">剪影</button>
+          </div>
+        </section>
+
+        <section>
+          <h3>边缘细致度 <small>决定目标曲线</small></h3>
+          <div class="seg" id="detail"></div>
+        </section>
+
+        <section>
+          <h3>一笔画</h3>
+          <div class="seg" id="tour">
+            <button data-v="greedy">贪心 + 2-opt</button>
+            <button data-v="tree">树形往返</button>
+          </div>
+          <label class="check"><input type="checkbox" id="jumpFast" /> 跳线加速（权重 0.3）</label>
+        </section>
+
+        <section>
+          <h3>圆的数量 <small>决定逼近程度</small></h3>
+          <div class="seg" id="circlePreset"></div>
+          <div class="seg mini" id="circleMode">
+            <button data-v="energy">按能量</button>
+            <button data-v="count">按个数</button>
+          </div>
+          <div class="row">
+            <input type="range" id="mSlider" min="0" max="1000" step="1" aria-label="圆的数量" />
+            <input type="number" id="mInput" min="1" step="1" aria-label="圆的数量" />
+          </div>
+          <div class="readout" id="mReadout"></div>
+        </section>
+
+        <section>
+          <h3>显示</h3>
+          <div class="checks">
+            <label class="check"><input type="checkbox" id="vCircles" checked /> 圆</label>
+            <label class="check"><input type="checkbox" id="vArrows" checked /> 箭头</label>
+            <label class="check"><input type="checkbox" id="vImage" checked /> 原图叠底</label>
+            <label class="check"><input type="checkbox" id="vTarget" /> 目标曲线</label>
+            <label class="check"><input type="checkbox" id="vFollow" /> 镜头跟随笔尖</label>
+            <label class="check"><input type="checkbox" id="vGrow" /> 逐渐加圆</label>
+          </div>
+          <div class="row">
+            <span class="label">跳线</span>
+            <div class="seg mini" id="vJumps">
+              <button data-v="dashed">淡色虚线</button>
+              <button data-v="hidden">隐藏</button>
+              <button data-v="solid">实线</button>
+            </div>
+          </div>
+        </section>
+
+        <section>
+          <h3>导出</h3>
+          <div class="row wrap">
+            <button id="exportJson">系数 JSON</button>
+            <button id="copyDesmos">Desmos 表达式</button>
+            <button id="record">录制一圈视频</button>
+          </div>
+        </section>
+
+        <section>
+          <h3>统计</h3>
+          <div class="stats" id="stats">—</div>
+        </section>
+      </aside>
+
+      <main class="stage" id="stage">
+        <canvas id="canvas"></canvas>
+        <div class="overlay" id="busy" hidden></div>
+        <div class="drop" id="drop" hidden>松开以载入图片</div>
+        <div class="bar">
+          <button id="play" class="icon" aria-label="播放/暂停">❚❚</button>
+          <input type="range" id="timeline" min="0" max="1000" step="1" aria-label="时间轴" />
+          <span class="tval" id="tval">t = 0.00</span>
+          <label class="speed">速度 <input type="range" id="speed" min="0" max="6" step="1" value="3" /></label>
+        </div>
+      </main>
+
+      <section class="eq">
+        <div class="eq-head">
+          <div class="seg" id="eqForm">
+            <button data-v="complex">复数形式</button>
+            <button data-v="phase">分坐标 · 相位</button>
+            <button data-v="trig">分坐标 · 三角级数</button>
+          </div>
+          <div class="eq-tools">
+            <label>半径小数 <input type="number" id="rDigits" value="1" min="0" max="8" /></label>
+            <label>相位小数 <input type="number" id="pDigits" value="2" min="0" max="8" /></label>
+            <button id="expand">展开全部</button>
+            <button id="copyTex" class="primary">复制 LaTeX</button>
+          </div>
+        </div>
+        <div class="eq-body" id="eq"></div>
+        <div class="eq-note" id="eqNote"></div>
+      </section>
+    </div>
+    <div class="toast" id="toast" hidden></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
