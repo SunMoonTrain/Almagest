@@ -23,7 +23,8 @@ const FOLLOW_ZOOM = 6;
 const BG = '#0a0d16';
 const CIRCLE_RGBA: [number, number, number, number] = [143 / 255, 176 / 255, 1, 0.22];
 const CIRCLE_RGBA_CSS = 'rgba(143,176,255,0.22)';
-const GIF = { size: 480, frames: 120, holdFrames: 25, delayMs: 50 };
+/** loop：画一圈的帧数；hold：画完后定格的帧数（逐渐加圆模式定格更久） */
+const GIF = { size: 480, loop: 120, hold: 25, growHold: 50, delayMs: 50 };
 /** 公式超过这么多项时折叠显示 */
 const FOLD_OVER = 12;
 const FOLD_SHOW = 8;
@@ -52,8 +53,6 @@ const view = {
   follow: false,
   grow: false,
   jumps: 'dashed' as 'dashed' | 'hidden' | 'solid',
-  /** 导出 GIF / 录制视频时不画原图和目标曲线 */
-  exportClean: true,
 };
 
 const anim = {
@@ -263,11 +262,14 @@ function resetGrow() {
   anim.growTrace = view.grow && state.result ? traceCurve(state.result.spec, 1) : null;
 }
 
+/** 逐渐加圆的下一步：每步加约 6%，至少一个 */
+const nextGrowM = (m: number, M: number) => Math.min(M, m + Math.max(1, Math.floor(m * 0.06)));
+
 function growStep() {
   const spec = state.result!.spec;
   if (anim.growM < state.M) {
     if (++anim.growTick % 3 === 0) {
-      anim.growM = Math.min(state.M, anim.growM + Math.max(1, Math.floor(anim.growM * 0.06)));
+      anim.growM = nextGrowM(anim.growM, state.M);
       anim.growTrace = traceCurve(spec, anim.growM);
       updateCircleUI();
     }
@@ -307,8 +309,6 @@ interface Scene {
   z: number;
   ox: number;
   oy: number;
-  /** 导出用：不画原图和目标曲线 */
-  clean?: boolean;
 }
 
 /** 箭头链：大的接在根部，小的在笔尖。useRotors = false 时直接用三角函数（离屏导出用）。 */
@@ -361,7 +361,6 @@ function draw() {
     z,
     ox: cssW / 2 - z * anim.camX,
     oy: cssH / 2 + z * anim.camY,
-    clean: anim.recorder !== null && view.exportClean,
   });
 }
 
@@ -377,7 +376,7 @@ function paint(g: CanvasRenderingContext2D, W: number, H: number, ratio: number,
 
   // 原图叠底
   const src = state.source;
-  if (view.image && !sc.clean && src?.kind === 'image' && res.sampled.flipH !== null) {
+  if (view.image && src?.kind === 'image' && res.sampled.flipH !== null) {
     const s = res.sampled;
     const k = z * s.scale;
     g.save();
@@ -391,7 +390,7 @@ function paint(g: CanvasRenderingContext2D, W: number, H: number, ratio: number,
   g.lineJoin = 'round';
 
   // 目标曲线
-  if (view.target && !sc.clean) {
+  if (view.target) {
     const s = res.sampled;
     g.beginPath();
     for (let n = 0; n < N; n++) g.lineTo(sx(s.x[n]), sy(s.y[n]));
@@ -509,26 +508,46 @@ function drawCircles(g: CanvasRenderingContext2D, W: number, H: number, ratio: n
   stats.circlesDrawn = count;
 }
 
-/** 离屏渲染一整圈并编码为 GIF。用当前的圆数、显示开关和镜头模式；不含「逐渐加圆」。勾选「只含圆和笔迹」时不画原图和目标曲线。 */
+/**
+ * 离屏渲染并编码为 GIF，沿用「显示」里的全部选项。普通模式画完整一圈后定格；
+ * 逐渐加圆模式下圆数每帧加约 6%（与屏幕上同一节奏），加满后定格。
+ */
 async function exportGif() {
   const res = state.result, tr = state.trace;
   if (!res || !tr || anim.exportingGif) return;
-  const M = state.M, N = res.spec.N;
+  const M = state.M, spec = res.spec, N = spec.N;
+  const grow = view.grow;
+  const ms: number[] = [];
+  if (grow) {
+    for (let m = 1; m < M; m = nextGrowM(m, M)) ms.push(m);
+    ms.push(M);
+  }
+  const frames = grow ? ms.length + GIF.growHold : GIF.loop + GIF.hold;
+  // 每帧的圆数、笔尖位置、笔迹揭开到哪里
+  const at = (f: number) => {
+    if (grow) return { m: ms[Math.min(f, ms.length - 1)], pos: ((f * N) / GIF.loop) % N, done: true };
+    return f < GIF.loop ? { m: M, pos: (f * N) / GIF.loop, done: false } : { m: M, pos: 0, done: true };
+  };
+  let traceM = M, trace = tr;
   const btn = $<HTMLButtonElement>('exportGif');
   anim.exportingGif = true;
   btn.disabled = true;
   try {
     const blob = await encodeGif(
-      GIF,
-      (g, S, p) => {
-        const pos = p >= 1 ? 0 : p * N;
-        computeNodes(M, pos, false);
-        const penX = anim.nodesX[M], penY = anim.nodesY[M];
+      { size: GIF.size, frames, delayMs: GIF.delayMs, paletteFrames: grow ? [frames - 1] : [GIF.loop / 2, frames - 1] },
+      (g, S, f) => {
+        const { m, pos, done } = at(f);
+        if (m !== traceM) {
+          traceM = m;
+          trace = m === M ? tr : traceCurve(spec, m);
+        }
+        computeNodes(m, pos, false);
+        const penX = anim.nodesX[m], penY = anim.nodesY[m];
         const z = ((S * 0.42) / 100) * (view.follow ? FOLLOW_ZOOM : 1);
         const camX = view.follow ? penX : 0, camY = view.follow ? penY : 0;
         paint(g, S, S, 1, {
-          m: M, tr, end: p >= 1 ? N : Math.floor(pos), partial: p < 1, penX, penY, z,
-          ox: S / 2 - z * camX, oy: S / 2 + z * camY, clean: view.exportClean,
+          m, tr: trace, end: done ? N : Math.floor(pos), partial: !done, penX, penY, z,
+          ox: S / 2 - z * camX, oy: S / 2 + z * camY,
         });
       },
       (done, total) => {
@@ -760,7 +779,7 @@ function setupControls() {
     applyM(+(e.target as HTMLInputElement).value || 1);
   });
 
-  const bindView = (id: string, key: 'circles' | 'arrows' | 'image' | 'target' | 'follow' | 'grow' | 'exportClean') =>
+  const bindView = (id: string, key: 'circles' | 'arrows' | 'image' | 'target' | 'follow' | 'grow') =>
     $<HTMLInputElement>(id).addEventListener('change', (e) => {
       view[key] = (e.target as HTMLInputElement).checked;
       if (key === 'grow') {
@@ -774,7 +793,6 @@ function setupControls() {
   bindView('vTarget', 'target');
   bindView('vFollow', 'follow');
   bindView('vGrow', 'grow');
-  bindView('exportClean', 'exportClean');
   onSeg('vJumps', (v) => (view.jumps = v as typeof view.jumps));
 
   const play = $('play');
