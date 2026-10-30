@@ -9,7 +9,10 @@ npm install
 npm run dev     # 开发服务器
 npm test        # 技术方案里的测试用例
 npm run build   # 产出 dist/，纯静态，可直接托管
+npm run build:single   # 产出 dist-single/almagest.html，单个文件，双击即可离线使用
 ```
+
+**分发给别人**：`npm run build:single` 生成的 `almagest.html` 把脚本、样式、公式字体和后台计算线程全部内联在一个文件里（约 700 KB），可以直接通过聊天软件、邮件、U 盘发给别人，对方双击用浏览器打开就能用，不需要联网。双击打开时浏览器不允许启动后台线程，计算改在主线程进行，换图或改档位时界面会停顿一下；托管在网站上时仍用后台线程。
 
 ## 代码结构
 

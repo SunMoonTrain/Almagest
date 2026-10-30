@@ -5,10 +5,11 @@ import { CIRCLE_PRESETS, DETAIL, DETAIL_KEYS, JUMP_FAST_WEIGHT, TARGET_LONG_SIDE
 import { DEMO_CURVES } from './core/curves';
 import { circleLimit, countForEnergy, energyKept, termsOf, traceCurve } from './core/fourier';
 import { coefficientsJSON, desmosText, equationLatex, type EqForm, type EqOptions } from './core/equation';
-import type { PipelineInput, PipelineOptions, PipelineResult } from './core/pipeline';
+import { runPipeline, type PipelineInput, type PipelineOptions, type PipelineResult } from './core/pipeline';
 import { traceColors, type TraceColors } from './core/colorize';
 import { GLCircles } from './glCircles';
 import { encodeGif } from './gif';
+import PipelineWorker from './worker?worker&inline';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -95,28 +96,53 @@ const stats = { circlesDrawn: 0, frame: 0, layerRedraws: 0 };
 
 // ---------- Worker 与缓存 ----------
 
-const worker = new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' });
-const pending = new Map<number, { resolve: (r: PipelineResult) => void; reject: (e: Error) => void }>();
+// Worker 内联进主脚本（构建时转成 Blob URL）。双击打开的单文件版（file://）里浏览器不允许
+// 启动 Blob URL 的 Worker，这时以及 Worker 出错时，改在主线程算（算的时候界面会停顿一下）。
+const pending = new Map<number, { input: PipelineInput; opts: PipelineOptions; resolve: (r: PipelineResult) => void; reject: (e: Error) => void }>();
 let reqId = 0;
 const cache = new Map<string, PipelineResult>();
+let worker: Worker | null = location.protocol === 'file:' ? null : new PipelineWorker();
 
-worker.onmessage = (e) => {
-  const m = e.data;
-  if (m.type === 'progress') {
-    if (m.id === reqId) setBusy(`正在计算：${m.stage}…`);
-    return;
-  }
-  const p = pending.get(m.id);
-  if (!p) return;
-  pending.delete(m.id);
-  if (m.type === 'done') p.resolve(m.result);
-  else p.reject(new Error(m.message));
-};
+if (worker) {
+  worker.onmessage = (e) => {
+    const m = e.data;
+    if (m.type === 'progress') {
+      if (m.id === reqId) setBusy(`正在计算：${m.stage}…`);
+      return;
+    }
+    const p = pending.get(m.id);
+    if (!p) return;
+    pending.delete(m.id);
+    if (m.type === 'done') p.resolve(m.result);
+    else p.reject(new Error(m.message));
+  };
+  worker.onerror = () => {
+    worker?.terminate();
+    worker = null;
+    const waiting = [...pending.entries()];
+    pending.clear();
+    for (const [, p] of waiting) computeHere(p.input, p.opts).then(p.resolve, p.reject);
+  };
+}
+
+/** 在主线程算：先让出一帧，让「正在计算」的提示画出来 */
+function computeHere(input: PipelineInput, opts: PipelineOptions): Promise<PipelineResult> {
+  return new Promise((resolve, reject) =>
+    setTimeout(() => {
+      try {
+        resolve(runPipeline(input, opts));
+      } catch (err) {
+        reject(err);
+      }
+    }, 30),
+  );
+}
 
 function compute(id: number, input: PipelineInput, opts: PipelineOptions): Promise<PipelineResult> {
+  if (!worker) return computeHere(input, opts);
   return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject });
-    worker.postMessage({ id, input, opts });
+    pending.set(id, { input, opts, resolve, reject });
+    worker!.postMessage({ id, input, opts });
   });
 }
 
