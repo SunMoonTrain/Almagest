@@ -191,6 +191,8 @@ input[type='range'] {
 }
 .seg button {
   flex: 1;
+  /* 允许按钮比内容窄，否则文字长的那个会把外框撑破 */
+  min-width: 0;
   border: 0;
   background: transparent;
   padding: 5px 6px;
@@ -344,6 +346,9 @@ input[type='range'] {
 }
 .eq-head .seg {
   flex: 0 1 auto;
+}
+.eq-head .seg button {
+  flex: 1 0 auto;
 }
 .eq-tools {
   display: flex;

@@ -934,7 +934,7 @@ function download(blob: Blob, name: string) {
 }
 
 function setupControls() {
-  $('detail').innerHTML = DETAIL_KEYS.map((k) => `<button data-v="${k}">${DETAIL[k].label}<small>σ ${DETAIL[k].sigma} · N ${DETAIL[k].N}</small></button>`).join('');
+  $('detail').innerHTML = DETAIL_KEYS.map((k) => `<button data-v="${k}">${DETAIL[k].label}<small>σ ${DETAIL[k].sigma}</small><small>N ${DETAIL[k].N}</small></button>`).join('');
   $('circlePreset').innerHTML = CIRCLE_PRESETS.map((_, i) => `<button data-v="${i}"></button>`).join('');
   $('curves').innerHTML = DEMO_CURVES.map((c) => `<button data-v="${c.id}">${c.label}</button>`).join('');
 
