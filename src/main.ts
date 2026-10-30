@@ -52,6 +52,8 @@ const view = {
   follow: false,
   grow: false,
   jumps: 'dashed' as 'dashed' | 'hidden' | 'solid',
+  /** 导出 GIF / 录制视频时不画原图和目标曲线 */
+  exportClean: true,
 };
 
 const anim = {
@@ -305,6 +307,8 @@ interface Scene {
   z: number;
   ox: number;
   oy: number;
+  /** 导出用：不画原图和目标曲线 */
+  clean?: boolean;
 }
 
 /** 箭头链：大的接在根部，小的在笔尖。useRotors = false 时直接用三角函数（离屏导出用）。 */
@@ -357,6 +361,7 @@ function draw() {
     z,
     ox: cssW / 2 - z * anim.camX,
     oy: cssH / 2 + z * anim.camY,
+    clean: anim.recorder !== null && view.exportClean,
   });
 }
 
@@ -372,7 +377,7 @@ function paint(g: CanvasRenderingContext2D, W: number, H: number, ratio: number,
 
   // 原图叠底
   const src = state.source;
-  if (view.image && src?.kind === 'image' && res.sampled.flipH !== null) {
+  if (view.image && !sc.clean && src?.kind === 'image' && res.sampled.flipH !== null) {
     const s = res.sampled;
     const k = z * s.scale;
     g.save();
@@ -386,7 +391,7 @@ function paint(g: CanvasRenderingContext2D, W: number, H: number, ratio: number,
   g.lineJoin = 'round';
 
   // 目标曲线
-  if (view.target) {
+  if (view.target && !sc.clean) {
     const s = res.sampled;
     g.beginPath();
     for (let n = 0; n < N; n++) g.lineTo(sx(s.x[n]), sy(s.y[n]));
@@ -504,7 +509,7 @@ function drawCircles(g: CanvasRenderingContext2D, W: number, H: number, ratio: n
   stats.circlesDrawn = count;
 }
 
-/** 离屏渲染一整圈并编码为 GIF。用当前的圆数、显示开关和镜头模式；不含「逐渐加圆」。 */
+/** 离屏渲染一整圈并编码为 GIF。用当前的圆数、显示开关和镜头模式；不含「逐渐加圆」。勾选「只含圆和笔迹」时不画原图和目标曲线。 */
 async function exportGif() {
   const res = state.result, tr = state.trace;
   if (!res || !tr || anim.exportingGif) return;
@@ -523,7 +528,7 @@ async function exportGif() {
         const camX = view.follow ? penX : 0, camY = view.follow ? penY : 0;
         paint(g, S, S, 1, {
           m: M, tr, end: p >= 1 ? N : Math.floor(pos), partial: p < 1, penX, penY, z,
-          ox: S / 2 - z * camX, oy: S / 2 + z * camY,
+          ox: S / 2 - z * camX, oy: S / 2 + z * camY, clean: view.exportClean,
         });
       },
       (done, total) => {
@@ -755,7 +760,7 @@ function setupControls() {
     applyM(+(e.target as HTMLInputElement).value || 1);
   });
 
-  const bindView = (id: string, key: 'circles' | 'arrows' | 'image' | 'target' | 'follow' | 'grow') =>
+  const bindView = (id: string, key: 'circles' | 'arrows' | 'image' | 'target' | 'follow' | 'grow' | 'exportClean') =>
     $<HTMLInputElement>(id).addEventListener('change', (e) => {
       view[key] = (e.target as HTMLInputElement).checked;
       if (key === 'grow') {
@@ -769,6 +774,7 @@ function setupControls() {
   bindView('vTarget', 'target');
   bindView('vFollow', 'follow');
   bindView('vGrow', 'grow');
+  bindView('exportClean', 'exportClean');
   onSeg('vJumps', (v) => (view.jumps = v as typeof view.jumps));
 
   const play = $('play');
